@@ -1,0 +1,70 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: langsmith-auth-proxy
+  labels:
+    cloud.googleapis.com/location: __REGION__
+    managed-by: langsmith-auth-proxy-deploy
+  annotations:
+    run.googleapis.com/launch-stage: BETA
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/container-dependencies: '{"auth-proxy":["ext-authz"]}'
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      containers:
+        - name: auth-proxy
+          image: __REGION__-docker.pkg.dev/__PROJECT_ID__/__REPOSITORY__/auth-proxy-envoy:__IMAGE_TAG__
+          ports:
+            - name: http1
+              containerPort: 10000
+          env:
+            - name: JWKS_JSON
+              value: 'JWKS_JSON_PLACEHOLDER'
+            - name: UPSTREAM_HOST
+              value: '__UPSTREAM_HOST__'
+            - name: UPSTREAM_PORT
+              value: '__UPSTREAM_PORT__'
+            - name: JWT_ISSUER
+              value: '__JWT_ISSUER__'
+            - name: JWT_AUDIENCE
+              value: '__JWT_AUDIENCE__'
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 10000
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            failureThreshold: 15
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 10000
+            periodSeconds: 10
+        - name: ext-authz
+          image: __REGION__-docker.pkg.dev/__PROJECT_ID__/__REPOSITORY__/auth-proxy-ext-authz:__IMAGE_TAG__
+          env:
+            - name: LLM_PROVIDER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: latest
+                  name: __SECRET_NAME__
+          resources:
+            limits:
+              cpu: "0.5"
+              memory: 256Mi
+          startupProbe:
+            httpGet:
+              path: /check
+              port: 10002
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            failureThreshold: 15

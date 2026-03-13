@@ -1,0 +1,6 @@
+keys/
+deploy.sh
+teardown.sh
+test-cloud-run.sh
+service.yaml
+*.md

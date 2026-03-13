@@ -1,0 +1,11 @@
+FROM envoyproxy/envoy:v1.31-latest
+
+RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
+
+COPY envoy.yaml /etc/envoy/envoy.yaml
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 10000
+
+ENTRYPOINT ["/entrypoint.sh"]
