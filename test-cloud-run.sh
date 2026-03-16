@@ -21,7 +21,7 @@ PROXY_URL="${PROXY_URL:?Set PROXY_URL to your Cloud Run service URL}"
 generate_jwt() {
   local exp_offset="${1:-300}" # seconds from now
   local aud="${2:-test-audience}"
-  local iss="${3:-langsmith:self-hosted:prod-us}"
+  local iss="${3:-langsmith}"
 
   local header=$(echo -n '{"alg":"RS256","typ":"JWT"}' | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
 
@@ -105,7 +105,7 @@ check "POST with garbage JWT" "$HTTP_CODE" "401"
 # Test 4: Request with valid JWT -> real upstream completion (Anthropic example)
 echo ""
 echo "--- Test 4: POST with valid JWT (should return 200 with completion) ---"
-VALID_JWT=$(generate_jwt 300 "test-audience" "langsmith:self-hosted:prod-us")
+VALID_JWT=$(generate_jwt 300 "test-audience" "langsmith")
 RESPONSE=$(curl -s -w '\n%{http_code}' -X POST "$PROXY_URL/v1/messages" \
   -H "Content-Type: application/json" \
   -H "X-LangSmith-LLM-Auth: $VALID_JWT" \
@@ -126,7 +126,7 @@ fi
 # Test 5: Expired JWT (should 401)
 echo ""
 echo "--- Test 5: POST with expired JWT (should return 401) ---"
-EXPIRED_JWT=$(generate_jwt -300 "test-audience" "langsmith:self-hosted:prod-us")
+EXPIRED_JWT=$(generate_jwt -300 "test-audience" "langsmith")
 HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$PROXY_URL/v1/messages" \
   -H "Content-Type: application/json" \
   -H "X-LangSmith-LLM-Auth: $EXPIRED_JWT" \
@@ -136,7 +136,7 @@ check "POST with expired JWT" "$HTTP_CODE" "401"
 # Test 6: Wrong audience (should 403)
 echo ""
 echo "--- Test 6: POST with wrong audience (should return 403) ---"
-WRONG_AUD_JWT=$(generate_jwt 300 "wrong-audience" "langsmith:self-hosted:prod-us")
+WRONG_AUD_JWT=$(generate_jwt 300 "wrong-audience" "langsmith")
 HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$PROXY_URL/v1/messages" \
   -H "Content-Type: application/json" \
   -H "X-LangSmith-LLM-Auth: $WRONG_AUD_JWT" \

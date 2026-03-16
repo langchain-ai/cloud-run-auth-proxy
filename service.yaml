@@ -25,14 +25,22 @@ spec:
           env:
             - name: JWKS_JSON
               value: 'JWKS_JSON_PLACEHOLDER'
-            - name: UPSTREAM_HOST
-              value: '__UPSTREAM_HOST__'
-            - name: UPSTREAM_PORT
-              value: '__UPSTREAM_PORT__'
+            - name: UPSTREAM_URL
+              value: '__UPSTREAM_URL__'
             - name: JWT_ISSUER
               value: '__JWT_ISSUER__'
             - name: JWT_AUDIENCE
               value: '__JWT_AUDIENCE__'
+            - name: JWT_VALIDATION_ENABLED
+              value: '__JWT_VALIDATION_ENABLED__'
+            - name: EXT_AUTHZ_ENABLED
+              value: '__EXT_AUTHZ_ENABLED__'
+            - name: HTTP_PROXY_HOST
+              value: '__HTTP_PROXY_HOST__'
+            - name: HTTP_PROXY_PORT
+              value: '__HTTP_PROXY_PORT__'
+            - name: NO_PROXY
+              value: '__NO_PROXY__'
           resources:
             limits:
               cpu: "1"

@@ -53,15 +53,23 @@ gcloud services enable \
 # Required
 export PROJECT_ID=my-gcp-project
 export PUB_KEY_PATH=./keys/pub.pem            # RSA public key for JWKS
-export UPSTREAM_HOST=api.anthropic.com         # your LLM provider hostname
+export UPSTREAM_URL=https://api.anthropic.com  # full URL — path is preserved if included
 export LLM_PROVIDER_API_KEY=sk-ant-api03-...   # provider API key
 
 # Optional (shown with defaults)
 export REGION=us-central1
-export UPSTREAM_PORT=443
-export JWT_ISSUER=langsmith:self-hosted:prod-us
+export JWT_ISSUER=langsmith
 export JWT_AUDIENCE=test-audience
 export SECRET_NAME=llm-provider-api-key
+
+# Corporate proxy (optional)
+export HTTP_PROXY_HOST=proxy.corp.com          # proxy hostname
+export HTTP_PROXY_PORT=3128                    # proxy port (default: 3128)
+export NO_PROXY=internal.host,.internal.corp   # hosts to bypass proxy
+
+# Feature toggles (optional)
+export JWT_VALIDATION_ENABLED=true             # set false to disable JWT filter
+export EXT_AUTHZ_ENABLED=true                  # set false to disable ext_authz filter
 ```
 
 ### 2. Run
@@ -146,12 +154,16 @@ All values are environment variables passed to `deploy.sh`:
 |----------|----------|---------|-------------|
 | `PROJECT_ID` | yes | — | GCP project ID |
 | `PUB_KEY_PATH` | yes | — | Path to RSA public key PEM file |
-| `UPSTREAM_HOST` | yes | — | LLM provider hostname (e.g. `api.anthropic.com`, `api.openai.com`) |
+| `UPSTREAM_URL` | yes | — | Full upstream URL (e.g. `https://api.anthropic.com`, `https://gateway.example.com/api/v1`). If a path is included, all requests are prefixed with it. |
 | `LLM_PROVIDER_API_KEY` | yes* | — | Provider API key. Only required on first deploy or to update the secret. |
 | `REGION` | no | `us-central1` | Cloud Run and Artifact Registry region |
-| `UPSTREAM_PORT` | no | `443` | Upstream TLS port |
-| `JWT_ISSUER` | no | `langsmith:self-hosted:prod-us` | Expected `iss` claim in JWTs |
+| `JWT_ISSUER` | no | `langsmith` | Expected `iss` claim in JWTs |
 | `JWT_AUDIENCE` | no | `test-audience` | Expected `aud` claim in JWTs |
+| `JWT_VALIDATION_ENABLED` | no | `true` | Set to `false` to disable the JWT validation filter |
+| `EXT_AUTHZ_ENABLED` | no | `true` | Set to `false` to disable the ext_authz filter |
+| `HTTP_PROXY_HOST` | no | — | Corporate HTTP proxy hostname. Uses a two-listener loopback pattern since Envoy ignores `HTTP_PROXY` env vars. |
+| `HTTP_PROXY_PORT` | no | `3128` | Corporate HTTP proxy port |
+| `NO_PROXY` | no | — | Comma-separated hostnames to bypass the proxy (e.g. `internal.host,.internal.corp`). Supports exact match and domain suffix (`.corp.com`). |
 | `SECRET_NAME` | no | `llm-provider-api-key` | Secret Manager secret name |
 | `SERVICE_NAME` | no | `langsmith-auth-proxy` | Cloud Run service name |
 | `REPOSITORY` | no | `langsmith-auth-proxy` | Artifact Registry repository name |
@@ -208,7 +220,7 @@ CMD ["python", "ext-authz-openai.py"]
 And deploy:
 
 ```bash
-export UPSTREAM_HOST=api.openai.com
+export UPSTREAM_URL=https://api.openai.com
 export LLM_PROVIDER_API_KEY=sk-...
 ./deploy.sh
 ```
@@ -224,9 +236,9 @@ export LLM_PROVIDER_API_KEY=sk-...
 
 | File | Provider-specific? | Description |
 |------|--------------------|-------------|
-| `envoy.yaml` | No | Envoy config template — all values substituted at runtime |
-| `entrypoint.sh` | No | Substitutes env vars into `envoy.yaml` then starts Envoy |
-| `Dockerfile.envoy` | No | Envoy image with baked-in config template |
+| `envoy.yaml` | No | Reference-only — shows the default generated config. Overwritten at runtime by `entrypoint.sh`. |
+| `entrypoint.sh` | No | Generates `envoy.yaml` from env vars (with conditionals for proxy, path, TLS, ext_authz) then starts Envoy |
+| `Dockerfile.envoy` | No | Envoy image with entrypoint script |
 | `ext-authz-anthropic.py` | **Yes** | Anthropic ext_authz sidecar (swap for your provider) |
 | `Dockerfile.ext-authz` | No | Python image for ext_authz sidecar |
 | `service.yaml` | No | Cloud Run service definition template |
@@ -239,13 +251,15 @@ export LLM_PROVIDER_API_KEY=sk-...
 
 | Concept | Kubernetes (Helm chart) | Cloud Run |
 |---------|------------------------|-----------|
-| Envoy config | ConfigMap from template | Baked into image, env vars substituted at startup |
+| Envoy config | ConfigMap from Go template | Generated at startup by `entrypoint.sh` (Python) |
 | ext_authz sidecar | Pod sidecar container | Cloud Run sidecar with `container-dependencies` |
 | API key secret | Kubernetes Secret | Secret Manager `secretKeyRef` |
 | JWKS | Helm value `jwksJson` | `JWKS_JSON` env var |
-| Upstream config | Helm values | `UPSTREAM_HOST` / `UPSTREAM_PORT` env vars |
+| Upstream config | Helm value `upstream` (full URL) | `UPSTREAM_URL` env var (full URL with optional path) |
 | JWT config | Helm values `jwtIssuer` / `jwtAudiences` | `JWT_ISSUER` / `JWT_AUDIENCE` env vars |
-| Health check | Envoy health_check filter | `direct_response` route on `/healthz` |
+| Health check | `envoy.filters.http.health_check` filter | `envoy.filters.http.health_check` filter |
+| Corporate proxy | `httpProxy.enabled` / `host` / `port` / `noProxy` | `HTTP_PROXY_HOST` / `HTTP_PROXY_PORT` / `NO_PROXY` env vars |
+| Path preservation | Path component of `upstream` URL | Path component of `UPSTREAM_URL` |
 
 ## Troubleshooting
 
@@ -261,7 +275,7 @@ gcloud logging read \
 Common causes:
 - ext_authz binding to `127.0.0.1` instead of `0.0.0.0`
 - Missing or invalid `LLM_PROVIDER_API_KEY` secret
-- Missing `UPSTREAM_HOST` env var
+- Missing or malformed `UPSTREAM_URL` env var
 
 ### JWT validation fails (401 on valid JWT)
 

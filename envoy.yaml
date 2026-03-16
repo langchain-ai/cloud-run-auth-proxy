@@ -1,3 +1,11 @@
+# This file is overwritten at runtime by entrypoint.sh which generates the
+# envoy configuration based on environment variables. It is kept here as a
+# reference showing the default configuration (no proxy, no upstream path,
+# JWT + ext_authz enabled) that entrypoint.sh produces for a basic setup
+# like UPSTREAM_URL=https://api.anthropic.com.
+#
+# See entrypoint.sh for the full set of supported environment variables and
+# the conditional logic that mirrors helm chart v0.0.5.
 static_resources:
   listeners:
     - name: listener_0
@@ -18,35 +26,35 @@ static_resources:
                       domains: ["*"]
                       routes:
                         - match:
-                            path: "/healthz"
-                          direct_response:
-                            status: 200
-                            body:
-                              inline_string: "ok"
-                        - match:
                             prefix: "/"
                           route:
                             cluster: upstream_provider
-                            host_rewrite_literal: UPSTREAM_HOST_PLACEHOLDER
+                            host_rewrite_literal: api.anthropic.com
                             timeout: 0s
                             idle_timeout: 300s
                 http_filters:
+                  - name: envoy.filters.http.health_check
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.health_check.v3.HealthCheck
+                      pass_through_mode: false
+                      headers:
+                        - name: ":path"
+                          string_match:
+                            exact: "/healthz"
                   - name: envoy.filters.http.jwt_authn
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
                       providers:
                         langsmith_jwt:
-                          issuer: "JWT_ISSUER_PLACEHOLDER"
+                          issuer: langsmith
                           audiences:
-                            - "JWT_AUDIENCE_PLACEHOLDER"
+                            - "test-audience"
                           local_jwks:
                             inline_string: 'JWKS_JSON_PLACEHOLDER'
                           from_headers:
                             - name: X-LangSmith-LLM-Auth
                           forward: true
                       rules:
-                        - match:
-                            path: "/healthz"
                         - match:
                             prefix: "/"
                           requires:
@@ -63,7 +71,7 @@ static_resources:
                         server_uri:
                           uri: http://localhost:10002
                           cluster: ext_authz_service
-                          timeout: 5s
+                          timeout: 10s
                         path_prefix: "/check"
                         authorization_response:
                           allowed_upstream_headers:
@@ -90,13 +98,13 @@ static_resources:
               - endpoint:
                   address:
                     socket_address:
-                      address: UPSTREAM_HOST_PLACEHOLDER
-                      port_value: UPSTREAM_PORT_PLACEHOLDER
+                      address: api.anthropic.com
+                      port_value: 443
       transport_socket:
         name: envoy.transport_sockets.tls
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-          sni: UPSTREAM_HOST_PLACEHOLDER
+          sni: api.anthropic.com
     - name: ext_authz_service
       connect_timeout: 5s
       type: STRICT_DNS

@@ -13,9 +13,16 @@ set -euo pipefail
 #   export PROJECT_ID=my-gcp-project
 #   export REGION=us-central1
 #   export PUB_KEY_PATH=/path/to/pub.pem
-#   export UPSTREAM_HOST=api.anthropic.com      # your LLM provider
-#   export LLM_PROVIDER_API_KEY=sk-ant-...      # your provider API key
+#   export UPSTREAM_URL=https://api.anthropic.com       # or https://gateway.example.com/api/v1
+#   export LLM_PROVIDER_API_KEY=sk-ant-...              # your provider API key
 #   ./deploy.sh
+#
+# Optional:
+#   export HTTP_PROXY_HOST=proxy.corp.com               # corporate proxy hostname
+#   export HTTP_PROXY_PORT=3128                          # corporate proxy port (default: 3128)
+#   export NO_PROXY=internal.host,.internal.corp         # hosts to bypass proxy
+#   export JWT_VALIDATION_ENABLED=true                   # set false to disable JWT filter
+#   export EXT_AUTHZ_ENABLED=true                        # set false to disable ext_authz filter
 ###############################################################################
 
 # --- Configuration ---
@@ -25,10 +32,14 @@ REPOSITORY="${REPOSITORY:-langsmith-auth-proxy}"
 PUB_KEY_PATH="${PUB_KEY_PATH:?Set PUB_KEY_PATH to RSA public key PEM file}"
 SECRET_NAME="${SECRET_NAME:-llm-provider-api-key}"
 SERVICE_NAME="${SERVICE_NAME:-langsmith-auth-proxy}"
-UPSTREAM_HOST="${UPSTREAM_HOST:?Set UPSTREAM_HOST env var (e.g. api.anthropic.com)}"
-UPSTREAM_PORT="${UPSTREAM_PORT:-443}"
-JWT_ISSUER="${JWT_ISSUER:-langsmith:self-hosted:prod-us}"
+UPSTREAM_URL="${UPSTREAM_URL:?Set UPSTREAM_URL env var (e.g. https://api.anthropic.com)}"
+JWT_ISSUER="${JWT_ISSUER:-langsmith}"
 JWT_AUDIENCE="${JWT_AUDIENCE:-test-audience}"
+JWT_VALIDATION_ENABLED="${JWT_VALIDATION_ENABLED:-true}"
+EXT_AUTHZ_ENABLED="${EXT_AUTHZ_ENABLED:-true}"
+HTTP_PROXY_HOST="${HTTP_PROXY_HOST:-}"
+HTTP_PROXY_PORT="${HTTP_PROXY_PORT:-3128}"
+NO_PROXY="${NO_PROXY:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -58,7 +69,11 @@ echo "=== LangSmith Auth Proxy - Cloud Run Deploy ==="
 echo "Project:    $PROJECT_ID"
 echo "Region:     $REGION"
 echo "Repository: $REPOSITORY"
-echo "Upstream:   ${UPSTREAM_HOST}:${UPSTREAM_PORT}"
+echo "Upstream:   ${UPSTREAM_URL}"
+if [ -n "$HTTP_PROXY_HOST" ]; then
+  echo "HTTP Proxy: ${HTTP_PROXY_HOST}:${HTTP_PROXY_PORT}"
+  [ -n "$NO_PROXY" ] && echo "NO_PROXY:   ${NO_PROXY}"
+fi
 echo ""
 
 # --- Step 1: Ensure Artifact Registry repository exists ---
@@ -238,20 +253,26 @@ replacements = {
     '__REPOSITORY__': sys.argv[4],
     'JWKS_JSON_PLACEHOLDER': jwks_yaml_safe,
     '__IMAGE_TAG__': sys.argv[6],
-    '__UPSTREAM_HOST__': sys.argv[7],
-    '__UPSTREAM_PORT__': sys.argv[8],
-    '__JWT_ISSUER__': sys.argv[9],
-    '__JWT_AUDIENCE__': sys.argv[10],
-    '__SECRET_NAME__': sys.argv[11],
+    '__UPSTREAM_URL__': sys.argv[7],
+    '__JWT_ISSUER__': sys.argv[8],
+    '__JWT_AUDIENCE__': sys.argv[9],
+    '__SECRET_NAME__': sys.argv[10],
+    '__JWT_VALIDATION_ENABLED__': sys.argv[11],
+    '__EXT_AUTHZ_ENABLED__': sys.argv[12],
+    '__HTTP_PROXY_HOST__': sys.argv[13],
+    '__HTTP_PROXY_PORT__': sys.argv[14],
+    '__NO_PROXY__': sys.argv[15],
 }
 result = template
 for placeholder, value in replacements.items():
     result = result.replace(placeholder, value)
-open(sys.argv[12], 'w').write(result)
+open(sys.argv[16], 'w').write(result)
 " "$SCRIPT_DIR/service.yaml" \
   "$PROJECT_ID" "$REGION" "$REPOSITORY" "$JWKS_JSON" "$IMAGE_TAG" \
-  "$UPSTREAM_HOST" "$UPSTREAM_PORT" "$JWT_ISSUER" "$JWT_AUDIENCE" \
-  "$SECRET_NAME" "$RENDERED"
+  "$UPSTREAM_URL" "$JWT_ISSUER" "$JWT_AUDIENCE" \
+  "$SECRET_NAME" "$JWT_VALIDATION_ENABLED" "$EXT_AUTHZ_ENABLED" \
+  "$HTTP_PROXY_HOST" "$HTTP_PROXY_PORT" "$NO_PROXY" \
+  "$RENDERED"
 
 echo "Rendered service definition"
 echo ""
