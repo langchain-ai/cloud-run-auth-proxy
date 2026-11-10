@@ -3,7 +3,11 @@ set -e
 
 # Required env vars
 : "${UPSTREAM_URL:?ERROR: UPSTREAM_URL environment variable is required (e.g. https://api.anthropic.com or https://gateway.example.com/api/v1)}"
-: "${JWKS_JSON:?ERROR: JWKS_JSON environment variable is required}"
+# JWKS_URI (preferred: Envoy fetches and refreshes keys) or JWKS_JSON (inline keys)
+if [ -z "${JWKS_URI:-}" ] && [ -z "${JWKS_JSON:-}" ]; then
+  echo "ERROR: set JWKS_URI (e.g. https://api.smith.langchain.com/.well-known/jwks.json) or JWKS_JSON" >&2
+  exit 1
+fi
 
 # Generate envoy.yaml using Python — mirrors the helm chart v0.0.5 config-map template.
 # Python is used instead of sed/envsubst because:
@@ -30,7 +34,12 @@ if not hostname:
 # --- Config flags ---
 jwt_enabled = os.environ.get('JWT_VALIDATION_ENABLED', 'true').lower() == 'true'
 ext_authz_enabled = os.environ.get('EXT_AUTHZ_ENABLED', 'true').lower() == 'true'
-jwks_json = os.environ['JWKS_JSON']
+jwks_json = os.environ.get('JWKS_JSON', '')
+jwks_uri = os.environ.get('JWKS_URI', '')
+jwks_cache_seconds = os.environ.get('JWKS_CACHE_DURATION_SECONDS', '300')
+if not jwks_cache_seconds.isdigit():
+    print(f"ERROR: JWKS_CACHE_DURATION_SECONDS must be an integer, got: {jwks_cache_seconds!r}", file=sys.stderr)
+    sys.exit(1)
 jwt_issuer = os.environ.get('JWT_ISSUER', 'langsmith')
 jwt_audience = os.environ.get('JWT_AUDIENCE', 'test-audience')
 
@@ -42,19 +51,30 @@ if proxy_host and not proxy_port.isdigit():
     sys.exit(1)
 no_proxy = [h.strip() for h in os.environ.get('NO_PROXY', '').split(',') if h.strip()]
 
-use_proxy = False
-if proxy_host:
-    use_proxy = True
+def should_proxy(host):
+    if not proxy_host:
+        return False
     for entry in no_proxy:
-        if entry == '*':
-            use_proxy = False
-            break
-        if entry == hostname:
-            use_proxy = False
-            break
-        if entry.startswith('.') and (hostname.endswith(entry) or hostname == entry.lstrip('.')):
-            use_proxy = False
-            break
+        if entry == '*' or entry == host:
+            return False
+        if entry.startswith('.') and (host.endswith(entry) or host == entry.lstrip('.')):
+            return False
+    return True
+
+use_proxy = should_proxy(hostname)
+
+# --- Remote JWKS (Envoy fetches keys itself, so LangSmith key rotation needs no redeploy) ---
+use_remote_jwks = jwt_enabled and bool(jwks_uri)
+if use_remote_jwks:
+    jwks_parsed = urlparse(jwks_uri)
+    jwks_host = jwks_parsed.hostname
+    if jwks_parsed.scheme != 'https' or not jwks_host:
+        print(f"ERROR: JWKS_URI '{jwks_uri}' must be an https:// URL", file=sys.stderr)
+        sys.exit(1)
+    jwks_port = jwks_parsed.port or 443
+    jwks_use_proxy = should_proxy(jwks_host)
+else:
+    jwks_use_proxy = False
 
 use_tls = scheme == 'https'
 route_cluster = 'loopback_cluster' if use_proxy else 'upstream_provider'
@@ -150,10 +170,22 @@ if jwt_enabled:
     w(26, f'issuer: "{jwt_issuer}"')
     w(26, 'audiences:')
     w(28, f'- "{jwt_audience}"')
-    w(26, 'local_jwks:')
-    # NOTE: same single-quote escaping in deploy.sh for JWKS in service.yaml
-    jwks_safe = jwks_json.replace("'", "''")
-    w(28, "inline_string: '" + jwks_safe + "'")
+    if use_remote_jwks:
+        w(26, 'remote_jwks:')
+        w(28, 'http_uri:')
+        w(30, f'uri: "{jwks_uri}"')
+        w(30, 'cluster: langsmith_jwks')
+        w(30, 'timeout: 5s')
+        w(28, f'cache_duration: {jwks_cache_seconds}s')
+        w(28, 'async_fetch:')
+        w(30, 'fast_listener: false')
+        w(28, 'retry_policy:')
+        w(30, 'num_retries: 3')
+    else:
+        w(26, 'local_jwks:')
+        # NOTE: same single-quote escaping in deploy.sh for JWKS in service.yaml
+        jwks_safe = jwks_json.replace("'", "''")
+        w(28, "inline_string: '" + jwks_safe + "'")
     w(26, 'from_headers:')
     w(28, '- name: X-LangSmith-LLM-Auth')
     w(26, 'forward: true')
@@ -211,6 +243,23 @@ if use_proxy:
     w(16, 'tunneling_config:')
     w(18, f'hostname: {hostname}:{port}')
 
+# -- Listener for tunneling JWKS fetches through the corporate proxy --
+if jwks_use_proxy:
+    w(4, '- name: listener_jwks')
+    w(6, 'address:')
+    w(8, 'socket_address:')
+    w(10, 'address: 127.0.0.1')
+    w(10, 'port_value: 10003')
+    w(6, 'filter_chains:')
+    w(8, '- filters:')
+    w(12, '- name: envoy.filters.network.tcp_proxy')
+    w(14, 'typed_config:')
+    w(16, f'"@type": {T_TCP_PROXY}')
+    w(16, 'stat_prefix: tcp_to_proxy_jwks')
+    w(16, 'cluster: proxy_cluster')
+    w(16, 'tunneling_config:')
+    w(18, f'hostname: {jwks_host}:{jwks_port}')
+
 # -- Clusters --
 w(2)
 w(2, 'clusters:')
@@ -219,11 +268,21 @@ if use_proxy:
     write_cluster('loopback_cluster', '127.0.0.1', 10001,
                   cluster_type='STATIC', dns_family=None,
                   tls_sni=hostname if use_tls else None)
-    write_cluster('proxy_cluster', proxy_host, proxy_port)
 else:
     write_cluster('upstream_provider', hostname, port,
                   cluster_type='LOGICAL_DNS',
                   tls_sni=hostname if use_tls else None)
+
+if use_proxy or jwks_use_proxy:
+    write_cluster('proxy_cluster', proxy_host, proxy_port)
+
+if use_remote_jwks:
+    if jwks_use_proxy:
+        write_cluster('langsmith_jwks', '127.0.0.1', 10003,
+                      cluster_type='STATIC', dns_family=None, tls_sni=jwks_host)
+    else:
+        write_cluster('langsmith_jwks', jwks_host, jwks_port,
+                      cluster_type='LOGICAL_DNS', tls_sni=jwks_host)
 
 if ext_authz_enabled:
     write_cluster('ext_authz_service', '127.0.0.1', 10002)
@@ -238,6 +297,11 @@ echo "  Upstream: ${UPSTREAM_URL}"
 echo "  JWT issuer: ${JWT_ISSUER:-langsmith}"
 echo "  JWT audience: ${JWT_AUDIENCE:-test-audience}"
 echo "  JWT validation: ${JWT_VALIDATION_ENABLED:-true}"
+if [ -n "${JWKS_URI:-}" ]; then
+  echo "  JWKS: remote ${JWKS_URI} (refresh every ${JWKS_CACHE_DURATION_SECONDS:-300}s)"
+else
+  echo "  JWKS: inline (JWKS_JSON)"
+fi
 echo "  Ext authz: ${EXT_AUTHZ_ENABLED:-true}"
 if [ -n "${HTTP_PROXY_HOST:-}" ]; then
   echo "  HTTP proxy: ${HTTP_PROXY_HOST}:${HTTP_PROXY_PORT:-3128}"

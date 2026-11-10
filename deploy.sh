@@ -180,42 +180,38 @@ if ! command -v python3 &>/dev/null; then
   exit 1
 fi
 
-RAW_JWKS=$(mktmp json)
+JWKS_JSON=""
+JWKS_URI=""
 if [ -n "$PUB_KEY_PATH" ]; then
-  echo "Using Ed25519 public key from $PUB_KEY_PATH"
+  echo "Using inline JWKS from Ed25519 public key $PUB_KEY_PATH"
   PUB_DER=$(mktmp der)
   openssl pkey -pubin -in "$PUB_KEY_PATH" -outform DER -out "$PUB_DER"
-  python3 - "$PUB_DER" > "$RAW_JWKS" <<'PYEOF'
+  JWKS_JSON=$(python3 - "$PUB_DER" <<'PYEOF'
 import base64, json, sys
 der = open(sys.argv[1], "rb").read()
 prefix = bytes.fromhex("302a300506032b6570032100")
 if len(der) != 44 or not der.startswith(prefix):
     raise SystemExit("ERROR: PUB_KEY_PATH must be an Ed25519 public key (openssl genpkey -algorithm ed25519)")
 x = base64.urlsafe_b64encode(der[12:]).rstrip(b"=").decode()
-print(json.dumps({"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig", "x": x}]}))
-PYEOF
-else
-  echo "Fetching LangSmith JWKS from $LANGSMITH_JWKS_URL"
-  curl -fsSL "$LANGSMITH_JWKS_URL" -o "$RAW_JWKS"
-fi
-
-JWKS_JSON=$(python3 - "$RAW_JWKS" <<'PYEOF'
-import json, sys
-jwks = json.load(open(sys.argv[1]))
-public = {"kty", "crv", "alg", "use", "kid", "x"}
-keys = [
-    {k: v for k, v in key.items() if k in public}
-    for key in jwks.get("keys", [])
-    if key.get("kty") == "OKP" and key.get("crv") == "Ed25519"
-]
-if not keys:
-    raise SystemExit("ERROR: no Ed25519 (OKP) keys found in JWKS")
-print(json.dumps({"keys": keys}, separators=(",", ":")))
+print(json.dumps({"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig", "x": x}]}, separators=(",", ":")))
 PYEOF
 )
-
-echo "JWKS built successfully"
-echo "NOTE: the JWKS is embedded at deploy time. Re-run ./deploy.sh after LangSmith rotates its signing key."
+else
+  JWKS_URI="$LANGSMITH_JWKS_URL"
+  echo "Envoy will fetch and refresh LangSmith JWKS from $JWKS_URI"
+  RAW_JWKS=$(mktmp json)
+  if curl -fsSL "$JWKS_URI" -o "$RAW_JWKS" && python3 - "$RAW_JWKS" <<'PYEOF'
+import json, sys
+keys = json.load(open(sys.argv[1])).get("keys", [])
+sys.exit(0 if any(k.get("kty") == "OKP" and k.get("crv") == "Ed25519" for k in keys) else 1)
+PYEOF
+  then
+    echo "JWKS URL reachable and has Ed25519 keys"
+  else
+    echo "WARNING: could not confirm $JWKS_URI serves Ed25519 keys from this machine." >&2
+    echo "         The proxy fetches it at runtime; check Cloud Run logs if JWT checks fail." >&2
+  fi
+fi
 echo ""
 
 # --- Step 5: Render service.yaml ---
@@ -232,6 +228,7 @@ replacements = {
     '__REPOSITORY__': sys.argv[4],
     'JWKS_JSON_PLACEHOLDER': jwks_yaml_safe,
     '__IMAGE_TAG__': sys.argv[6],
+    '__JWKS_URI__': sys.argv[16],
     '__UPSTREAM_URL__': sys.argv[7],
     '__JWT_ISSUER__': sys.argv[8],
     '__JWT_AUDIENCE__': sys.argv[9],
@@ -245,13 +242,13 @@ replacements = {
 result = template
 for placeholder, value in replacements.items():
     result = result.replace(placeholder, value)
-open(sys.argv[16], 'w').write(result)
+open(sys.argv[17], 'w').write(result)
 " "$SCRIPT_DIR/service.yaml" \
   "$PROJECT_ID" "$REGION" "$REPOSITORY" "$JWKS_JSON" "$IMAGE_TAG" \
   "$UPSTREAM_URL" "$JWT_ISSUER" "$JWT_AUDIENCE" \
   "$SECRET_NAME" "$JWT_VALIDATION_ENABLED" "$EXT_AUTHZ_ENABLED" \
   "$HTTP_PROXY_HOST" "$HTTP_PROXY_PORT" "$NO_PROXY" \
-  "$RENDERED"
+  "$JWKS_URI" "$RENDERED"
 
 echo "Rendered service definition"
 echo ""
