@@ -150,7 +150,7 @@ w(28, 'idle_timeout: 300s')
 # -- HTTP filters --
 w(16, 'http_filters:')
 
-# Health check filter (replaces separate /healthz route)
+# Health check filter (replaces separate /health route)
 w(18, '- name: envoy.filters.http.health_check')
 w(20, 'typed_config:')
 w(22, f'"@type": {T_HEALTH}')
@@ -158,7 +158,7 @@ w(22, 'pass_through_mode: false')
 w(22, 'headers:')
 w(24, '- name: ":path"')
 w(26, 'string_match:')
-w(28, 'exact: "/healthz"')
+w(28, 'exact: "/health"')
 
 # JWT authn filter (conditional)
 if jwt_enabled:

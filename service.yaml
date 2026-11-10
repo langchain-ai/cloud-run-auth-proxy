@@ -49,14 +49,14 @@ spec:
               memory: 512Mi
           startupProbe:
             httpGet:
-              path: /healthz
+              path: /health
               port: 10000
             initialDelaySeconds: 2
             periodSeconds: 2
             failureThreshold: 15
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /health
               port: 10000
             periodSeconds: 10
         - name: ext-authz

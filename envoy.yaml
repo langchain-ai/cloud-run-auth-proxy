@@ -40,7 +40,7 @@ static_resources:
                       headers:
                         - name: ":path"
                           string_match:
-                            exact: "/healthz"
+                            exact: "/health"
                   - name: envoy.filters.http.jwt_authn
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
