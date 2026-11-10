@@ -89,9 +89,9 @@ echo "========================================="
 
 # Test 1: Healthz (no JWT required)
 echo ""
-echo "--- Test 1: GET /healthz (should return 200, no JWT needed) ---"
-HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$PROXY_URL/healthz")
-check "GET /healthz" "$HTTP_CODE" "200"
+echo "--- Test 1: GET /health (should return 200, no JWT needed) ---"
+HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$PROXY_URL/health")
+check "GET /health" "$HTTP_CODE" "200"
 
 # Test 2: Request without JWT (should 401)
 echo ""
