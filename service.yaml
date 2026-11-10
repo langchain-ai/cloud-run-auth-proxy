@@ -25,6 +25,8 @@ spec:
           env:
             - name: JWKS_JSON
               value: 'JWKS_JSON_PLACEHOLDER'
+            - name: JWKS_URI
+              value: '__JWKS_URI__'
             - name: UPSTREAM_URL
               value: '__UPSTREAM_URL__'
             - name: JWT_ISSUER

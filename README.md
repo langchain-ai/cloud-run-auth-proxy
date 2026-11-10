@@ -32,7 +32,7 @@ Client
 ## Prerequisites
 
 1. **gcloud CLI** — authenticated with Owner or Editor role on the project
-2. **LangSmith JWKS** — LangSmith signs proxy JWTs with its own Ed25519 key. `deploy.sh` downloads the public keys from LangSmith's `/.well-known/jwks.json` (SaaS by default; set `LANGSMITH_JWKS_URL` for self-hosted) and embeds them in the proxy. You do not need your own key pair. For self-hosted setup of the signing key, see [Configure a signing JWKS](https://docs.langchain.com/langsmith/kubernetes#configure-a-signing-jwks).
+2. **LangSmith JWKS** — LangSmith signs proxy JWTs with its own Ed25519 key. `deploy.sh` configures Envoy to fetch the public keys from LangSmith's `/.well-known/jwks.json` (SaaS US by default; set `LANGSMITH_JWKS_URL` for other regions or self-hosted) and refresh them every 5 minutes, so key rotation needs no redeploy. If `HTTP_PROXY_HOST` is set, the fetch goes through the corporate proxy unless the host is in `NO_PROXY`. You do not need your own key pair. For self-hosted setup of the signing key, see [Configure a signing JWKS](https://docs.langchain.com/langsmith/kubernetes#configure-a-signing-jwks).
 3. **LLM provider API key**
 4. **GCP APIs enabled:**
 
@@ -79,7 +79,7 @@ export EXT_AUTHZ_ENABLED=true                  # set false to disable ext_authz 
 ./deploy.sh
 ```
 
-The JWKS is embedded at deploy time, so re-run `./deploy.sh` after LangSmith rotates its signing key.
+With `PUB_KEY_PATH`, the JWKS is embedded at deploy time instead, so the proxy trusts only that key until you redeploy.
 
 `deploy.sh` will:
 
@@ -88,7 +88,7 @@ The JWKS is embedded at deploy time, so re-run `./deploy.sh` after LangSmith rot
 | 1 | Create an Artifact Registry Docker repository (if needed) |
 | 2 | Build and push the Envoy and ext-authz images via Cloud Build (parallel) |
 | 3 | Create/update a Secret Manager secret with your API key and grant the Cloud Run service account access |
-| 4 | Download the LangSmith JWKS (or build one from `PUB_KEY_PATH`) and keep only the public Ed25519 keys |
+| 4 | Point Envoy at the LangSmith JWKS URL (or build an inline JWKS from `PUB_KEY_PATH`) |
 | 5 | Render `service.yaml` with all config values |
 | 6 | Deploy to Cloud Run via `gcloud run services replace` |
 | 7 | Set public access IAM policy (`allUsers` invoker) and print the service URL |
@@ -267,7 +267,7 @@ export LLM_PROVIDER_API_KEY=sk-...
 | Envoy config | ConfigMap from Go template | Generated at startup by `entrypoint.sh` (Python) |
 | ext_authz sidecar | Pod sidecar container | Cloud Run sidecar with `container-dependencies` |
 | API key secret | Kubernetes Secret | Secret Manager `secretKeyRef` |
-| JWKS | Helm value `jwksJson` | `JWKS_JSON` env var |
+| JWKS | Helm value `jwksUri` / `jwksJson` | `JWKS_URI` / `JWKS_JSON` env var |
 | Upstream config | Helm value `upstream` (full URL) | `UPSTREAM_URL` env var (full URL with optional path) |
 | JWT config | Helm values `jwtIssuer` / `jwtAudiences` | `JWT_ISSUER` / `JWT_AUDIENCE` env vars |
 | Health check | `envoy.filters.http.health_check` filter | `envoy.filters.http.health_check` filter |
@@ -292,7 +292,7 @@ Common causes:
 
 ### JWT validation fails (401 on valid JWT)
 
-- Verify JWKS matches your signing key — check the `JWKS_JSON` env var in the active revision
+- Verify JWKS matches your signing key — check the `JWKS_URI` (or `JWKS_JSON`) env var in the active revision, and look for JWKS fetch errors in the auth-proxy logs
 - Confirm `JWT_ISSUER` and `JWT_AUDIENCE` match the claims in your JWT
 
 ### 403 on valid JWT
