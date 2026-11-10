@@ -6,13 +6,11 @@ set -euo pipefail
 #
 # Prerequisites:
 #   - gcloud CLI authenticated with appropriate permissions
-#   - RSA public key for JWKS at $PUB_KEY_PATH
 #   - LLM_PROVIDER_API_KEY env var set (for initial secret creation)
 #
 # Usage:
 #   export PROJECT_ID=my-gcp-project
 #   export REGION=us-central1
-#   export PUB_KEY_PATH=/path/to/pub.pem
 #   export UPSTREAM_URL=https://api.anthropic.com       # or https://gateway.example.com/api/v1
 #   export LLM_PROVIDER_API_KEY=sk-ant-...              # your provider API key
 #   ./deploy.sh
@@ -23,13 +21,18 @@ set -euo pipefail
 #   export NO_PROXY=internal.host,.internal.corp         # hosts to bypass proxy
 #   export JWT_VALIDATION_ENABLED=true                   # set false to disable JWT filter
 #   export EXT_AUTHZ_ENABLED=true                        # set false to disable ext_authz filter
+#   export LANGSMITH_JWKS_URL=https://langsmith.example.com/.well-known/jwks.json
+#                                                        # self-hosted; defaults to LangSmith SaaS (US)
+#   export PUB_KEY_PATH=/path/to/pub.pem                 # Ed25519 public key; use instead of the URL
+#                                                        # for testing or no outbound access to LangSmith
 ###############################################################################
 
 # --- Configuration ---
 PROJECT_ID="${PROJECT_ID:?Set PROJECT_ID env var}"
 REGION="${REGION:-us-central1}"
 REPOSITORY="${REPOSITORY:-langsmith-auth-proxy}"
-PUB_KEY_PATH="${PUB_KEY_PATH:?Set PUB_KEY_PATH to RSA public key PEM file}"
+PUB_KEY_PATH="${PUB_KEY_PATH:-}"
+LANGSMITH_JWKS_URL="${LANGSMITH_JWKS_URL:-https://api.smith.langchain.com/.well-known/jwks.json}"
 SECRET_NAME="${SECRET_NAME:-llm-provider-api-key}"
 SERVICE_NAME="${SERVICE_NAME:-langsmith-auth-proxy}"
 UPSTREAM_URL="${UPSTREAM_URL:?Set UPSTREAM_URL env var (e.g. https://api.anthropic.com)}"
@@ -170,73 +173,49 @@ gcloud secrets add-iam-policy-binding "$SECRET_NAME" \
   --quiet
 echo ""
 
-# --- Step 4: Generate JWKS JSON from RSA public key ---
-echo "--- Step 4: Generate JWKS JSON ---"
+# --- Step 4: Build JWKS JSON (LangSmith signs proxy JWTs with Ed25519 / EdDSA) ---
+echo "--- Step 4: Build JWKS JSON ---"
 if ! command -v python3 &>/dev/null; then
-  echo "ERROR: python3 is required to generate JWKS" >&2
+  echo "ERROR: python3 is required to build JWKS" >&2
   exit 1
 fi
 
-JWKS_JSON=$(python3 - "$PUB_KEY_PATH" <<'PYEOF'
-import json, sys, base64, subprocess
+RAW_JWKS=$(mktmp json)
+if [ -n "$PUB_KEY_PATH" ]; then
+  echo "Using Ed25519 public key from $PUB_KEY_PATH"
+  PUB_DER=$(mktmp der)
+  openssl pkey -pubin -in "$PUB_KEY_PATH" -outform DER -out "$PUB_DER"
+  python3 - "$PUB_DER" > "$RAW_JWKS" <<'PYEOF'
+import base64, json, sys
+der = open(sys.argv[1], "rb").read()
+prefix = bytes.fromhex("302a300506032b6570032100")
+if len(der) != 44 or not der.startswith(prefix):
+    raise SystemExit("ERROR: PUB_KEY_PATH must be an Ed25519 public key (openssl genpkey -algorithm ed25519)")
+x = base64.urlsafe_b64encode(der[12:]).rstrip(b"=").decode()
+print(json.dumps({"keys": [{"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig", "x": x}]}))
+PYEOF
+else
+  echo "Fetching LangSmith JWKS from $LANGSMITH_JWKS_URL"
+  curl -fsSL "$LANGSMITH_JWKS_URL" -o "$RAW_JWKS"
+fi
 
-def b64url(data):
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-pem_path = sys.argv[1]
-
-result = subprocess.run(
-    ["openssl", "rsa", "-pubin", "-in", pem_path, "-text", "-noout"],
-    capture_output=True, text=True, check=True
-)
-lines = result.stdout.split("\n")
-
-# Parse modulus
-mod_lines = []
-in_mod = False
-for line in lines:
-    if "Modulus:" in line:
-        in_mod = True
-        continue
-    if in_mod:
-        stripped = line.strip()
-        if stripped.startswith("Exponent:"):
-            break
-        mod_lines.append(stripped.replace(":", ""))
-
-if not mod_lines:
-    raise ValueError("Could not parse RSA modulus from openssl output")
-mod_hex = "".join(mod_lines)
-mod_bytes = bytes.fromhex(mod_hex)
-if mod_bytes[0] == 0:
-    mod_bytes = mod_bytes[1:]
-
-# Parse exponent
-exp_int = None
-for line in lines:
-    if "Exponent:" in line:
-        exp_int = int(line.split("(")[0].split(":")[1].strip())
-        break
-if exp_int is None:
-    raise ValueError("Could not parse RSA exponent from openssl output")
-
-exp_bytes = exp_int.to_bytes((exp_int.bit_length() + 7) // 8, "big")
-
-jwks = {
-    "keys": [{
-        "kty": "RSA",
-        "alg": "RS256",
-        "use": "sig",
-        "n": b64url(mod_bytes),
-        "e": b64url(exp_bytes),
-    }]
-}
-
-print(json.dumps(jwks, separators=(",", ":")))
+JWKS_JSON=$(python3 - "$RAW_JWKS" <<'PYEOF'
+import json, sys
+jwks = json.load(open(sys.argv[1]))
+public = {"kty", "crv", "alg", "use", "kid", "x"}
+keys = [
+    {k: v for k, v in key.items() if k in public}
+    for key in jwks.get("keys", [])
+    if key.get("kty") == "OKP" and key.get("crv") == "Ed25519"
+]
+if not keys:
+    raise SystemExit("ERROR: no Ed25519 (OKP) keys found in JWKS")
+print(json.dumps({"keys": keys}, separators=(",", ":")))
 PYEOF
 )
 
-echo "JWKS generated successfully"
+echo "JWKS built successfully"
+echo "NOTE: the JWKS is embedded at deploy time. Re-run ./deploy.sh after LangSmith rotates its signing key."
 echo ""
 
 # --- Step 5: Render service.yaml ---

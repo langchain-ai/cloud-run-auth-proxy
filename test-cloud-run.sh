@@ -8,6 +8,12 @@ set -euo pipefail
 # Anthropic as the example upstream — adjust the model/body if you're using a
 # different LLM provider.
 #
+# Test 4-7 need a deploy that trusts the test key: run deploy.sh with
+# PUB_KEY_PATH set to the matching Ed25519 public key. Generate a pair with:
+#   openssl genpkey -algorithm ed25519 -out keys/priv.pem
+#   openssl pkey -in keys/priv.pem -pubout -out keys/pub.pem
+# Requires OpenSSL 3.x (for pkeyutl -rawin).
+#
 # Usage:
 #   PROXY_URL=https://langsmith-auth-proxy-xxx.run.app \
 #   PRIV_KEY=/path/to/priv.pem \
@@ -17,13 +23,13 @@ set -euo pipefail
 PRIV_KEY="${PRIV_KEY:-$(dirname "$0")/keys/priv.pem}"
 PROXY_URL="${PROXY_URL:?Set PROXY_URL to your Cloud Run service URL}"
 
-# --- Generate a valid JWT signed with our RS256 private key ---
+# --- Generate a valid JWT signed with our Ed25519 (EdDSA) test private key ---
 generate_jwt() {
   local exp_offset="${1:-300}" # seconds from now
   local aud="${2:-test-audience}"
   local iss="${3:-langsmith}"
 
-  local header=$(echo -n '{"alg":"RS256","typ":"JWT"}' | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
+  local header=$(echo -n '{"alg":"EdDSA","typ":"JWT"}' | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
 
   local now=$(date +%s)
   local exp=$((now + exp_offset))
@@ -51,9 +57,11 @@ EOJSON
 )
   local payload=$(echo -n "$payload_json" | openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
 
-  local signature=$(echo -n "${header}.${payload}" | \
-    openssl dgst -sha256 -sign "$PRIV_KEY" | \
+  local signing_input=$(mktemp)
+  echo -n "${header}.${payload}" > "$signing_input"
+  local signature=$(openssl pkeyutl -sign -inkey "$PRIV_KEY" -rawin -in "$signing_input" | \
     openssl base64 -e -A | tr '+/' '-_' | tr -d '=')
+  rm -f "$signing_input"
 
   echo "${header}.${payload}.${signature}"
 }
